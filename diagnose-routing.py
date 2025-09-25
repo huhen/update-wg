@@ -19,6 +19,17 @@ def execute_command(cmd, description=""):
         print(f"❌ Ошибка выполнения команды '{cmd}': {e}")
         return None
 
+def execute_command_no_check(cmd, description="", shell=True):
+    """Выполняет команду без проверки результата (для команд, которые могут завершаться с ошибкой)"""
+    try:
+        result = subprocess.run(cmd, shell=shell, capture_output=True, text=True)
+        if description:
+            print(f"✅ {description}", file=sys.stderr)
+        return result.stdout, result.returncode
+    except Exception as e:
+        print(f"⚠️ Ошибка выполнения команды '{cmd}': {e}", file=sys.stderr)
+        return None, -1
+    
 def check_ipset():
     """Проверяет наличие ipset и его содержимое"""
     print("🔍 Проверка ipset...")
