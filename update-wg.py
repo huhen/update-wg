@@ -11,8 +11,9 @@ WG_CONFIG_FILE = '/etc/wireguard/wg1.conf'        # путь к конфигу W
 WG_INTERFACE = 'wg1'
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCLUDE_FILE = os.path.join(SCRIPT_DIR, 'exclude.txt') # локальные исключения
+INCLUDE_FILE = os.path.join(SCRIPT_DIR, 'include.txt') 
 COUNTRY_CODE = 'RU'                # страна для RIPE
-CUTOFF_PREFIX = 16                 # маска для "загрубления" мелких сетей
+CUTOFF_PREFIX = 12                 # маска для "загрубления" мелких сетей
 
 def read_cidrs_from_file(filepath):
     cidrs = []
@@ -24,6 +25,22 @@ def read_cidrs_from_file(filepath):
                     cidrs.append(line)
     except FileNotFoundError:
         print(f"⚠️ Файл {filepath} не найден. Продолжаем без локальных исключений.", file=sys.stderr)
+    return cidrs
+
+def read_cidrs_from_file(filepath):
+    """Читает CIDR из файла (игнорирует пустые строки и комментарии)."""
+    cidrs = []
+    if not os.path.exists(filepath):
+        print(f"⚠️ Файл {filepath} не найден. Пропускаем.", file=sys.stderr)
+        return cidrs
+    try:
+        with open(filepath, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    cidrs.append(line)
+    except Exception as e:
+        print(f"❌ Ошибка чтения {filepath}: {e}", file=sys.stderr)
     return cidrs
 
 def normalize_ripe_ipv4_list(ipv4_list):
@@ -139,15 +156,24 @@ def main():
     # 5. Вычитаем из полного IPv4
     full_ipv4 = IPSet(['0.0.0.0/0'])
     allowed_ipv4 = full_ipv4 - excluded_set
+
+    # 6. ДОБАВЛЯЕМ include.txt (приоритет выше!)
+    include_cidrs = read_cidrs_from_file(INCLUDE_FILE)
+    if include_cidrs:
+        include_set = IPSet(include_cidrs)
+        allowed_ipv4 = allowed_ipv4 | include_set  # объединение
+        print(f"➕ Добавлено из include.txt: {len(include_set.iter_cidrs())} CIDR", file=sys.stderr)
+
+    # 7. Преобразуем в список
     allowed_cidrs = [str(cidr) for cidr in allowed_ipv4.iter_cidrs()]
 
-    # 5. Формируем строку AllowedIPs
+    # 8. Формируем строку AllowedIPs
     allowed_ips_line = 'AllowedIPs = ' + ', '.join(allowed_cidrs)
 
-    # 6. Читаем конфиг
+    # 9. Читаем конфиг
     config_content = read_wg_config(WG_CONFIG_FILE)
 
-    # 7. Заменяем строку AllowedIPs
+    # 10. Заменяем строку AllowedIPs
     # Ищем любую строку, начинающуюся с "AllowedIPs" (с возможными пробелами)
     pattern = r'^(\s*AllowedIPs\s*=\s*).*$'
     if re.search(pattern, config_content, re.MULTILINE):
@@ -158,10 +184,10 @@ def main():
         new_content = config_content.rstrip() + '\n' + allowed_ips_line + '\n'
         print("⚠️ Строка AllowedIPs не найдена — добавлена в конец файла.", file=sys.stderr)
 
-    # 8. Записываем обратно
+    # 11. Записываем обратно
     write_wg_config(WG_CONFIG_FILE, new_content)
 
-    # 9. Опционально: выводим количество правил
+    # 12. Опционально: выводим количество правил
     print(f"📊 В AllowedIPs добавлено {len(allowed_cidrs)} префиксов.", file=sys.stderr)
 
     apply_wg_config(WG_INTERFACE, WG_CONFIG_FILE)
