@@ -218,6 +218,23 @@ def setup_routing_rules(wg_interface, route_table_id, fw_mark):
     else:
         print(f"❌ Интерфейс {wg_interface} не стал полностью готов за {max_wait} секунд, невозможно настроить маршрут", file=sys.stderr)
         sys.exit(1)
+    
+    # Проверяем, что маршрут по умолчанию в основной таблице ведет через ens3 (а не через wg1)
+    # Это нужно для обеспечения правильного поведения по умолчанию
+    main_route_check = execute_command_no_check("ip route show table main", "Проверка маршрута по умолчанию в основной таблице")
+    if main_route_check[0]:
+        default_routes = [line for line in main_route_check[0].split('\n') if 'default' in line]
+        if default_routes:
+            for route in default_routes:
+                if 'wg1' in route:
+                    print(f"⚠️ Обнаружен маршрут по умолчанию через wg1 в основной таблице: {route}")
+                    print(f"ℹ️ Это может изменить поведение по умолчанию. Убедитесь, что маршрут по умолчанию через ens3")
+                elif 'ens3' in route:
+                    print(f"✅ Маршрут по умолчанию через ens3 в основной таблице: {route}")
+        else:
+            print(f"⚠️ Не найден маршрут по умолчанию в основной таблице")
+    else:
+        print(f"⚠️ Не удалось проверить маршрут по умолчанию в основной таблице")
 
 def cleanup_routing_rules(route_table_id, fw_mark):
     """Очищает правила маршрутизации"""
@@ -277,7 +294,6 @@ def update_wireguard_config_for_ipset(config_path):
         new_lines = []
         interface_section_found = False
         table_param_added = False
-        allowed_ips_commented = False
         
         for line in lines:
             if '[Interface]' in line:
@@ -302,10 +318,9 @@ def update_wireguard_config_for_ipset(config_path):
                 table_param_added = True
                 new_lines.append(line)
                 interface_section_found = False  # Сбросим флаг, чтобы не обрабатывать другие секции как [Interface]
-            elif line.strip().startswith('AllowedIPs') and not allowed_ips_commented:
-                # Комментируем AllowedIPs в [Peer] секции
-                new_lines.append(f"# {line}  # Закомментировано для использования с ipset/iptables")
-                allowed_ips_commented = True
+            elif line.strip().startswith('AllowedIPs'):
+                # Пропускаем старые AllowedIPs в [Peer] секции
+                continue
             else:
                 new_lines.append(line)
         
@@ -322,23 +337,14 @@ def update_wireguard_config_for_ipset(config_path):
         else:
             modified_content = '\n'.join(new_lines)
         
-        # Добавляем минимальный AllowedIPs в [Peer] секцию, если он еще не добавлен
-        if not allowed_ips_commented:
-            modified_content = re.sub(
-                r'(\[Peer\]\s*\n)',
-                r'\1AllowedIPs = 0.0.0.0/32\n',  # Пустой маршрут, так как управление через iptables
-                modified_content,
-                count=1
-            )
-        else:
-            # Если AllowedIPs уже был закомментирован, оставляем как есть и добавляем новый после
-            # Находим место после закомментированных AllowedIPs и добавляем новый
-            modified_content = re.sub(
-                r'(\[Peer\]\s*\n(?:.*?#\s*AllowedIPs.*\n)*)(?!\s*AllowedIPs)',
-                r'\1AllowedIPs = 0.0.0.0/32\n',  # Пустой маршрут, так как управление через iptables
-                modified_content,
-                count=1
-            )
+        # Обновляем AllowedIPs в [Peer] секции, чтобы разрешить весь IPv4 трафик через туннель
+        # Но оставляем возможность для политической маршрутизации управлять направлением
+        modified_content = re.sub(
+            r'(\[Peer\]\s*\n)',
+            r'\1AllowedIPs = 0.0.0.0/1, 128.0.0.0/1\n',  # Все IPv4 адреса разрешены через туннель
+            modified_content,
+            count=1
+        )
         
         with open(config_path, 'w') as f:
             f.write(modified_content)

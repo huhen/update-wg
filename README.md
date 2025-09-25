@@ -1,46 +1,46 @@
-# Generator ip set
+# Система маршрутизации трафика через WireGuard
 
-Install Python and Git
-```
-sudo apt install -y python3-pip python3-venv git ipset iptables
-# add for ipset option
-sudo apt install -y ipset iptables iptables-persistent ipset-persistent
-```
+## Описание
 
-Install script
-```
-git clone https://github.com/huhen/update-wg.git
-cd update-wg
-sudo python3 -m venv /opt/update-wg
-sudo /opt/update-wg/bin/pip3 install -r requirements.txt
-sudo cp {update-wg.py,update-wg-ipset.py,exclude.txt,include.txt} /opt/update-wg
-```
+Система позволяет направлять трафик через WireGuard туннель только для определенных IP-адресов, оставляя остальной трафик через основной интерфейс.
 
-### Option 1: Using traditional WireGuard routes (original method)
-Refresh and apply config using traditional AllowedIPs approach
-```
-sudo /opt/update-wg/bin/python3 /opt/update-wg/update-wg.py
-```
+## Принцип работы
 
-### Option 2: Using ipset + iptables (recommended for better performance)
-Refresh and apply config using ipset/iptables approach
-```
-sudo /opt/update-wg/bin/python3 /opt/update-wg/update-wg-ipset.py
-```
+1. Скрипт `update-wg-ipset.py` получает список российских IP-адресов из RIPE
+2. Исключает локальные и специальные сети (из `exclude.txt`)
+3. Добавляет исключения из `include.txt` (имеют приоритет)
+4. Создает разницу между всеми IPv4 исключениями, получая список разрешенных IP-адресов
+5. Создает ipset с разрешенными IP-адресами
+6. Настраивает iptables для маркировки трафика в разрешенные IP-адреса
+7. Настраивает политику маршрутизации для направления помеченного трафика через WireGuard
 
-Edit exclude/include lists
-```
-sudo nano /opt/update-wg/exclude.txt
-sudo nano /opt/update-wg/include.txt
-```
+## Конфигурация WireGuard
 
-### Check current configuration
+В отличие от традиционного подхода, в WireGuard конфигурации:
+
+- Установлен `Table = off` для отключения автоматической маршрутизации
+- Установлен `AllowedIPs = 0.0.0.0/1, 128.0.0.0/1` для разрешения всего IPv4 трафика через туннель
+- Маршрутизацией управляет iptables + политика маршрутизации
+
+## Файлы конфигурации
+
+- `exclude.txt` - список сетей для исключения из маршрутизации через WireGuard
+- `include.txt` - список сетей для принудительного включения в маршрутизацию через WireGuard (имеет приоритет)
+- `/etc/wireguard/wg1.conf` - конфигурация WireGuard
+
+## Скрипты
+
+- `update-wg-ipset.py` - основной скрипт обновления конфигурации
+- `diagnose-routing.py` - скрипт диагностики текущего состояния системы
+
+## Установка
+
+1. Убедитесь, что установлены зависимости: `ipset`, `iptables`, `wireguard-tools`, `iproute2`
+2. Настройте конфигурацию WireGuard в `/etc/wireguard/wg1.conf`
+3. Запустите `sudo python3 update-wg-ipset.py`
+
+## Диагностика
+
+Для диагностики текущего состояния системы запустите:
 ```
-# Check ipset contents (when using ipset method)
-sudo ipset list wg_allowed_ips
-
-# Check iptables rules (when using ipset method)
-sudo iptables -L -v -n
-
-# Check WireGuard status
-sudo wg show
+sudo python3 diagnose-routing.py
