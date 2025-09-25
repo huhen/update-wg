@@ -9,12 +9,17 @@ Install script
 ```
 git clone https://github.com/huhen/update-wg.git
 cd update-wg
-python3 -m venv /opt/update-wg
-source env/bin/activate
-pip3 install -r requirements.txt
+sudo python3 -m venv /opt/update-wg
+sudo /opt/update-wg/bin/pip3 install -r requirements.txt
+sudo cp {update-wg.py,exclude.txt} /opt/update-wg
 ```
 
-Run
+Refresh and apply config
+```
+sudo /opt/update-wg/bin/python3 /opt/update-wg/update-wg.py
 ```
 
+Edit exlude
+```
+sudo nano /opt/update-wg/exclude.txt
 ```
