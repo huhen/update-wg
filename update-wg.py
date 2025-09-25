@@ -9,7 +9,8 @@ import os
 # === Настройки ===
 WG_CONFIG_FILE = '/etc/wireguard/wg1.conf'        # путь к конфигу WireGuard
 WG_INTERFACE = 'wg1'
-EXCLUDE_FILE = 'exclude.txt'       # локальные исключения
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+EXCLUDE_FILE = os.path.join(SCRIPT_DIR, 'exclude.txt') # локальные исключения
 COUNTRY_CODE = 'RU'                # страна для RIPE
 CUTOFF_PREFIX = 16                 # маска для "загрубления" мелких сетей
 
