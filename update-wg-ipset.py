@@ -10,13 +10,14 @@ import shutil
 # === Настройки ===
 WG_CONFIG_FILE = '/etc/wireguard/wg1.conf'        # путь конфигу WireGuard
 WG_INTERFACE = 'wg1'
-ETH_INTERFACE = 'ens3'
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCLUDE_FILE = os.path.join(SCRIPT_DIR, 'exclude.txt') # локальные исключения
 INCLUDE_FILE = os.path.join(SCRIPT_DIR, 'include.txt') 
 COUNTRY_CODE = 'RU'                # страна для RIPE
 CUTOFF_PREFIX = 10                 # маска для "загрубления" мелких сетей
 IPSET_NAME = 'wg_allowed_ips'      # имя для ipset
+ROUTE_TABLE_ID = '1000'            # ID таблицы маршрутов для WireGuard
+FW_MARK = '0x1'                    # fwmark для трафика через WireGuard
 
 def execute_command(cmd, description="", shell=True):
     """Выполняет команду и проверяет результат"""
@@ -29,6 +30,17 @@ def execute_command(cmd, description="", shell=True):
         print(f"❌ Ошибка выполнения команды '{cmd}': {e}", file=sys.stderr)
         print(f"stderr: {e.stderr}", file=sys.stderr)
         return None
+
+def execute_command_no_check(cmd, description="", shell=True):
+    """Выполняет команду без проверки результата (для команд, которые могут завершаться с ошибкой)"""
+    try:
+        result = subprocess.run(cmd, shell=shell, capture_output=True, text=True)
+        if description:
+            print(f"✅ {description}", file=sys.stderr)
+        return result.stdout, result.returncode
+    except Exception as e:
+        print(f"⚠️ Ошибка выполнения команды '{cmd}': {e}", file=sys.stderr)
+        return None, -1
 
 def read_cidrs_from_file(filepath):
     """Читает CIDR из файла (игнорирует пустые строки и комментарии)."""
@@ -106,7 +118,7 @@ def expand_small_networks(cidr_list, cutoff_prefix=24):
 
 def check_dependencies():
     """Проверяет наличие необходимых утилит"""
-    deps = ['ipset', 'iptables', 'wg']
+    deps = ['ipset', 'iptables', 'wg', 'ip']
     missing = []
     
     for dep in deps:
@@ -115,7 +127,7 @@ def check_dependencies():
     
     if missing:
         print(f"❌ Отсутствующие зависимости: {', '.join(missing)}", file=sys.stderr)
-        print("Для работы скрипта установите: ipset, iptables, wireguard-tools", file=sys.stderr)
+        print("Для работы скрипта установите: ipset, iptables, wireguard-tools, iproute2", file=sys.stderr)
         sys.exit(1)
     
     print("✅ Все зависимости присутствуют", file=sys.stderr)
@@ -123,8 +135,8 @@ def check_dependencies():
 def create_ipset(ipset_name):
     """Создает ipset для разрешенных IP-адресов"""
     # Проверяем, существует ли уже ipset
-    result = execute_command(f"ipset list {ipset_name}", f"Проверка существования ipset {ipset_name}")
-    if result is None:
+    result, code = execute_command_no_check(f"ipset list {ipset_name}", f"Проверка существования ipset {ipset_name}")
+    if code != 0:
         # Если не существует, создаем
         execute_command(f"ipset create {ipset_name} hash:net", f"Создание ipset {ipset_name}")
     else:
@@ -136,48 +148,77 @@ def flush_ipset(ipset_name):
 
 def add_to_ipset(ipset_name, cidr):
     """Добавляет CIDR в ipset"""
-    execute_command(f"ipset add {ipset_name} {cidr}", "")
+    execute_command(f"ipset add {ipset_name} {cidr}", f"Добавление {cidr} в ipset")
 
-def setup_iptables_rules(wg_interface, ipset_name):
-    """Настраивает iptables правила для перенаправления трафика"""
+def setup_routing_rules(wg_interface, route_table_id, fw_mark):
+    """Настраивает правила маршрутизации для направления трафика в wg_interface"""
+    # Добавляем таблицу маршрутов
+    with open('/etc/iproute2/rt_tables', 'a') as f:
+        f.write(f"\n{route_table_id} wg1_table\n")
+    print(f"✅ Добавлена таблица маршрутов {route_table_id} для {wg_interface}", file=sys.stderr)
+    
+    # Настраиваем правило политики маршрутизации
+    execute_command(f"ip rule add fwmark {fw_mark} table {route_table_id}", 
+                   f"Настройка правила политики маршрутизации для {wg_interface}")
+    
+    # Настраиваем маршрут по умолчанию через wg_interface в новой таблице
+    # Получаем адрес шлюза WireGuard из конфигурации
+    try:
+        with open(f'/etc/wireguard/{wg_interface}.conf', 'r') as f:
+            content = f.read()
+        
+        # Ищем адрес WireGuard интерфейса
+        for line in content.split('\n'):
+            if line.strip().startswith('Address'):
+                address_part = line.split('=')[1].strip()
+                wg_address = address_part.split('/')[0]  # Получаем IP-адрес без маски
+                break
+        else:
+            wg_address = "10.10.0.2"  # fallback
+        
+        # Устанавливаем маршрут по умолчанию через wg_interface
+        execute_command(f"ip route add default dev {wg_interface} table {route_table_id}", 
+                       f"Настройка маршрута по умолчанию через {wg_interface}")
+    except Exception as e:
+        # Если не удалось получить адрес, используем fallback
+        execute_command(f"ip route add default dev {wg_interface} table {route_table_id}", 
+                       f"Настройка маршрута по умолчанию через {wg_interface} (fallback)")
+
+def cleanup_routing_rules(route_table_id, fw_mark):
+    """Очищает правила маршрутизации"""
+    # Удаляем правило политики маршрутизации
+    try:
+        execute_command_no_check(f"ip rule del fwmark {fw_mark} table {route_table_id}", 
+                                f"Удаление правила политики маршрутизации")
+    except:
+        pass
+
+def setup_iptables_rules(wg_interface, ipset_name, fw_mark):
+    """Настраивает iptables правила для маркировки трафика"""
     # Удаляем старые правила, если они есть
-    cleanup_iptables_rules(wg_interface, ipset_name)
+    cleanup_iptables_rules(wg_interface, ipset_name, fw_mark)
     
-    # Правила для OUTPUT цепочки (исходящий трафик)
-    execute_command(f"iptables -A OUTPUT -m set --match-set {ipset_name} dst -o {wg_interface} -j ACCEPT", 
-                   f"Настройка OUTPUT правила для {wg_interface}")
-    execute_command(f"iptables -A OUTPUT -m set --match-set {ipset_name} dst -j RETURN", 
-                   f"Настройка OUTPUT RETURN правила для {wg_interface}")
+    # Правила для OUTPUT цепочки (маркировка исходящего трафика)
+    execute_command(f"iptables -A OUTPUT -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
+                   f"Настройка OUTPUT MARK правила для {wg_interface}")
     
-    # Правила для FORWARD цепочки (маршрутизация трафика)
-    execute_command(f"iptables -A FORWARD -i {ETH_INTERFACE} -o {wg_interface} -m set --match-set {ipset_name} dst -j ACCEPT", 
-                   f"Настройка FORWARD правила для {wg_interface}")
-    execute_command(f"iptables -A FORWARD -i {wg_interface} -o {ETH_INTERFACE} -j ACCEPT", 
-                   "Настройка обратного FORWARD правила")
+    # Правила для PREROUTING в mangle таблице (маркировка трафика)
+    execute_command(f"iptables -t mangle -A PREROUTING -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
+                   f"Настройка PREROUTING MARK правила")
 
-def cleanup_iptables_rules(wg_interface, ipset_name):
+def cleanup_iptables_rules(wg_interface, ipset_name, fw_mark):
     """Очищает старые iptables правила"""
     # Удаляем правила для OUTPUT
     try:
-        execute_command(f"iptables -D OUTPUT -m set --match-set {ipset_name} dst -o {wg_interface} -j ACCEPT", 
-                       f"Удаление старого OUTPUT правила для {wg_interface}")
-    except:
-        pass
-    try:
-        execute_command(f"iptables -D OUTPUT -m set --match-set {ipset_name} dst -j RETURN", 
-                       "Удаление старого OUTPUT RETURN правила")
+        execute_command_no_check(f"iptables -D OUTPUT -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
+                                f"Удаление старого OUTPUT MARK правила")
     except:
         pass
     
-    # Удаляем правила для FORWARD
+    # Удаляем правила для PREROUTING
     try:
-        execute_command(f"iptables -D FORWARD -i {ETH_INTERFACE} -o {wg_interface} -m set --match-set {ipset_name} dst -j ACCEPT", 
-                       "Удаление старого FORWARD правила")
-    except:
-        pass
-    try:
-        execute_command(f"iptables -D FORWARD -i {wg_interface} -o {ETH_INTERFACE} -j ACCEPT", 
-                       "Удаление старого обратного FORWARD правила")
+        execute_command_no_check(f"iptables -t mangle -D PREROUTING -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
+                                f"Удаление старого PREROUTING MARK правила")
     except:
         pass
 
@@ -216,7 +257,7 @@ def update_wireguard_config_for_ipset(config_path):
         print(f"❌ Ошибка обновления конфигурации WireGuard: {e}", file=sys.stderr)
         sys.exit(1)
 
-def save_persistent_config(ipset_name):
+def save_persistent_config(ipset_name, route_table_id, fw_mark):
     """Сохраняет конфигурацию для восстановления после перезагрузки"""
     try:
         # Проверяем, установлены ли пакеты для постоянства
@@ -233,6 +274,34 @@ def save_persistent_config(ipset_name):
         
         # Сохраняем ipset
         execute_command(f"ipset save {ipset_name} > /etc/ipset.conf", "Сохранение ipset")
+        
+        # Создаем скрипт для восстановления правил маршрутизации
+        restore_script = f"""#!/bin/bash
+# Скрипт восстановления правил маршрутизации после перезагрузки
+
+# Добавляем таблицу маршрутов
+echo "{route_table_id} wg1_table" >> /etc/iproute2/rt_tables
+
+# Восстанавливаем ipset
+ipset restore < /etc/ipset.conf
+
+# Настраиваем правило политики маршрутизации
+ip rule add fwmark {fw_mark} table {route_table_id}
+
+# Ждем немного, чтобы интерфейс поднялся
+sleep 5
+
+# Настраиваем маршрут по умолчанию через wg1 в таблице {route_table_id}
+ip route add default dev wg1 table {route_table_id} 2>/dev/null || echo "Маршрут wg1 еще не готов, будет настроен позже"
+
+# Восстанавливаем iptables правила
+iptables-restore < /etc/iptables/rules.v4
+"""
+        
+        with open('/etc/network/if-up.d/wg-restore-rules', 'w') as f:
+            f.write(restore_script)
+        
+        os.chmod('/etc/network/if-up.d/wg-restore-rules', 0o755)
         
         print("✅ Конфигурация сохранена для восстановления после перезагрузки", file=sys.stderr)
         print("ℹ️ Установите пакеты iptables-persistent и ipset-persistent для автоматического восстановления", file=sys.stderr)
@@ -268,7 +337,7 @@ def main():
     print(f"🧱 Всего исключений после объединения: {len(excluded_set.iter_cidrs())} CIDR", file=sys.stderr)
 
     # 5. Вычитаем из полного IPv4
-    full_ipv4 = IPSet(['0.0.0.0/0'])
+    full_ipv4 = IPSet(['0.0.0/0'])
     allowed_ipv4 = full_ipv4 - excluded_set
 
     # 6. ДОБАВЛЯЕМ include.txt (приоритет выше!)
@@ -288,17 +357,20 @@ def main():
     print(f"🌐 Добавление {len(allowed_cidrs)} CIDR в ipset...", file=sys.stderr)
     for i, cidr in enumerate(allowed_cidrs):
         add_to_ipset(IPSET_NAME, cidr)
-        # Показываем прогресс каждые 1000 записей
-        if (i + 1) % 1000 == 0:
+        # Показываем прогресс каждые 100 записей
+        if (i + 1) % 100 == 0:
             print(f" Процесс: {i + 1}/{len(allowed_cidrs)}", file=sys.stderr)
 
     # 9. Настраиваем iptables правила
-    setup_iptables_rules(WG_INTERFACE, IPSET_NAME)
+    setup_iptables_rules(WG_INTERFACE, IPSET_NAME, FW_MARK)
 
-    # 10. Обновляем конфигурацию WireGuard
+    # 10. Настраиваем правила маршрутизации
+    setup_routing_rules(WG_INTERFACE, ROUTE_TABLE_ID, FW_MARK)
+
+    # 11. Обновляем конфигурацию WireGuard
     update_wireguard_config_for_ipset(WG_CONFIG_FILE)
 
-    # 11. Перезапускаем WireGuard интерфейс для применения изменений в конфиге
+    # 12. Перезапускаем WireGuard интерфейс для применения изменений в конфиге
     try:
         subprocess.run(['systemctl', 'restart', f'wg-quick@{WG_INTERFACE}'], check=True)
         print(f"🔄 Интерфейс {WG_INTERFACE} перезапущен.", file=sys.stderr)
@@ -306,11 +378,12 @@ def main():
         print(f"❌ Ошибка перезапуска интерфейса {WG_INTERFACE}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 12. Сохраняем конфигурацию для восстановления после перезагрузки
-    save_persistent_config(IPSET_NAME)
+    # 13. Сохраняем конфигурацию для восстановления после перезагрузки
+    save_persistent_config(IPSET_NAME, ROUTE_TABLE_ID, FW_MARK)
 
     print(f"✅ Обновление завершено. Используется ipset {IPSET_NAME} с {len(allowed_cidrs)} CIDR.", file=sys.stderr)
     print(f"📊 Статистика: {len(local_excludes)} локальных исключений, {len(ripe_processed)} RIPE исключений, {len(include_cidrs) if include_cidrs else 0} включений", file=sys.stderr)
+    print(f"💡 Для проверки работы используйте: diagnose-routing.py", file=sys.stderr)
 
 if __name__ == '__main__':
     main()
