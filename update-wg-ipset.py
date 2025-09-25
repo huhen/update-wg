@@ -192,8 +192,9 @@ def setup_routing_rules(wg_interface, route_table_id, fw_mark):
             # Проверяем, есть ли IP-адрес на интерфейсе
             addr_result = execute_command_no_check(f"ip addr show {wg_interface}", "")
             if addr_result[0] and wg_interface in addr_result[0] and 'inet ' in addr_result[0]:
-                # Проверяем, что интерфейс действительно UP (а не только сконфигурирован)
-                if 'state UP' in addr_result[0]:
+                # Проверяем, что интерфейс действительно UP или UNKNOWN (для WireGuard интерфейсов)
+                # WireGuard интерфейсы могут отображать состояние UNKNOWN, что является нормальным
+                if 'state UP' in addr_result[0] or 'state UNKNOWN' in addr_result[0]:
                     # Проверяем, что WireGuard показывает пиров как активные
                     wg_result = execute_command_no_check(f"wg show {wg_interface}", "")
                     if wg_result[0] and 'latest handshake' in wg_result[0]:
