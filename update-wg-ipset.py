@@ -141,6 +141,8 @@ def create_ipset(ipset_name):
         execute_command(f"ipset create {ipset_name} hash:net", f"Создание ipset {ipset_name}")
     else:
         print(f"ℹ️ ipset {ipset_name} уже существует", file=sys.stderr)
+        # Всё равно вызываем flush, чтобы очистить существующие записи
+        flush_ipset(ipset_name)
 
 def flush_ipset(ipset_name):
     """Очищает ipset"""
@@ -148,15 +150,30 @@ def flush_ipset(ipset_name):
 
 def add_to_ipset(ipset_name, cidr):
     """Добавляет CIDR в ipset"""
-    # в консоль ничего не выводим чтоб не флудить
-    execute_command(f"ipset add {ipset_name} {cidr}")
+    # Выполняем команду добавления без вывода описания, чтобы не флудить
+    execute_command_no_check(f"ipset add {ipset_name} {cidr}")
 
 def setup_routing_rules(wg_interface, route_table_id, fw_mark):
     """Настраивает правила маршрутизации для направления трафика в wg_interface"""
-    # Добавляем таблицу маршрутов
-    with open('/etc/iproute2/rt_tables', 'a') as f:
-        f.write(f"\n{route_table_id} wg1_table\n")
-    print(f"✅ Добавлена таблица маршрутов {route_table_id} для {wg_interface}", file=sys.stderr)
+    # Проверяем, существует ли уже запись о таблице в rt_tables
+    table_exists = False
+    try:
+        with open('/etc/iproute2/rt_tables', 'r') as f:
+            if f" {route_table_id} wg1_table" in f.read() or f" {route_table_id}  wg1_table" in f.read():
+                table_exists = True
+    except FileNotFoundError:
+        # Если файла нет, создадим его
+        os.makedirs('/etc/iproute2', exist_ok=True)
+        with open('/etc/iproute2/rt_tables', 'w') as f:
+            f.write("# Map of table names to numbers\n")
+    
+    # Добавляем таблицу маршрутов, если её ещё нет
+    if not table_exists:
+        with open('/etc/iproute2/rt_tables', 'a') as f:
+            f.write(f"\n{route_table_id} wg1_table\n")
+        print(f"✅ Добавлена таблица маршрутов {route_table_id} для {wg_interface}", file=sys.stderr)
+    else:
+        print(f"ℹ️ Таблица маршрутов {route_table_id} для {wg_interface} уже существует", file=sys.stderr)
     
     # Настраиваем правило политики маршрутизации
     execute_command(f"ip rule add fwmark {fw_mark} table {route_table_id}",
@@ -169,12 +186,22 @@ def setup_routing_rules(wg_interface, route_table_id, fw_mark):
 
 def cleanup_routing_rules(route_table_id, fw_mark):
     """Очищает правила маршрутизации"""
-    # Удаляем правило политики маршрутизации
-    try:
-        execute_command_no_check(f"ip rule del fwmark {fw_mark} table {route_table_id}", 
-                                f"Удаление правила политики маршрутизации")
-    except:
-        pass
+    # Удаляем все правила политики маршрутизации с указанным fwmark
+    # Сначала получаем список правил
+    result = execute_command_no_check("ip rule show", "Получение списка правил маршрутизации")
+    if result[0]:
+        lines = result[0].split('\n')
+        for line in lines:
+            if f"fwmark {fw_mark}" in line and f"lookup {route_table_id}" in line:
+                # Извлекаем номер правила
+                parts = line.split(':')
+                if len(parts) > 0:
+                    rule_number = parts[0].strip()
+                    try:
+                        execute_command_no_check(f"ip rule del {rule_number}",
+                                                f"Удаление правила маршрутизации {rule_number}")
+                    except:
+                        pass
 
 def setup_iptables_rules(wg_interface, ipset_name, fw_mark):
     """Настраивает iptables правила для маркировки трафика"""
@@ -391,10 +418,13 @@ def main():
         if (i + 1) % 100 == 0:
             print(f" Процесс: {i + 1}/{len(allowed_cidrs)}", file=sys.stderr)
 
-    # 9. Настраиваем iptables правила
+    # 9. Очищаем старые правила маршрутизации
+    cleanup_routing_rules(ROUTE_TABLE_ID, FW_MARK)
+
+    # 10. Настраиваем iptables правила
     setup_iptables_rules(WG_INTERFACE, IPSET_NAME, FW_MARK)
 
-    # 10. Настраиваем правила маршрутизации
+    # 11. Настраиваем правила маршрутизации
     setup_routing_rules(WG_INTERFACE, ROUTE_TABLE_ID, FW_MARK)
 
     # 11. Обновляем конфигурацию WireGuard
@@ -414,6 +444,16 @@ def main():
     print(f"✅ Обновление завершено. Используется ipset {IPSET_NAME} с {len(allowed_cidrs)} CIDR.", file=sys.stderr)
     print(f"📊 Статистика: {len(local_excludes)} локальных исключений, {len(ripe_processed)} RIPE исключений, {len(include_cidrs) if include_cidrs else 0} включений", file=sys.stderr)
     print(f"💡 Для проверки работы используйте: diagnose-routing.py", file=sys.stderr)
+    
+    # Проверяем, что ipset содержит записи
+    result = execute_command_no_check(f"ipset list {IPSET_NAME}", "Проверка содержимого ipset после настройки")
+    if result[0]:
+        # Подсчитываем количество записей
+        lines = result[0].split('\n')
+        entries = [line for line in lines if '.' in line and any(c.isdigit() for c in line) and not line.startswith('Name:') and not line.startswith('Type:') and not line.startswith('Revision:') and not line.startswith('Header:') and not line.startswith('Size in memory:') and not line.startswith('References:') and not line.startswith('Number of entries:') and not line.startswith('Members:')]
+        print(f"📊 Фактически добавлено {len(entries)} записей в ipset {IPSET_NAME}", file=sys.stderr)
+    else:
+        print(f"⚠️  Не удалось проверить содержимое ipset {IPSET_NAME}", file=sys.stderr)
 
 if __name__ == '__main__':
     main()
