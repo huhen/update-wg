@@ -27,14 +27,15 @@ def check_ipset():
     result = execute_command("ipset list wg_allowed_ips", "Проверка существования ipset wg_allowed_ips")
     if result:
         print("✅ ipset wg_allowed_ips существует")
-        # Подсчитываем количество записей
+        # Подсчитываем количество записей (ищем строки с содержимым, а не заголовки)
         lines = result.split('\n')
-        entries = [line for line in lines if line.strip().startswith('IP')]
+        # Пропускаем заголовочные строки и ищем только те, что содержат IP-адреса
+        entries = [line for line in lines if '.' in line and any(c.isdigit() for c in line) and not line.startswith('Name:') and not line.startswith('Type:') and not line.startswith('Revision:') and not line.startswith('Header:') and not line.startswith('Size in memory:') and not line.startswith('References:') and not line.startswith('Number of entries:') and not line.startswith('Members:')]
         print(f"📊 Найдено {len(entries)} записей в ipset")
         
         # Проверяем, содержит ли ipset нужный IP
         target_ip = "151.101.194.217"
-        has_target = any(target_ip in line for line in lines)
+        has_target = any(target_ip.split('.')[0] + '.' + target_ip.split('.')[1] in line for line in lines if '.' in line)
         if has_target:
             print(f"✅ Целевой IP {target_ip} присутствует в ipset")
         else:
@@ -139,21 +140,33 @@ def check_policy_routing():
         print("✅ Правила политики маршрутизации:")
         print(f"   {result.strip()}")
         
-        # Проверяем, есть ли правило для fwmark
-        if "fwmark 0x1" in result and "table" in result:
-            print("✅ Найдено правило политики маршрутизации для fwmark 0x1")
+        # Подсчитываем количество правил для fwmark
+        lines = result.split('\n')
+        fwmark_rules = [line for line in lines if "fwmark 0x1" in line and ("wg1_table" in line or "1000" in line)]
+        if len(fwmark_rules) > 0:
+            if len(fwmark_rules) == 1:
+                print("✅ Найдено 1 правило политики маршрутизации для fwmark 0x1")
+            else:
+                print(f"⚠️  Найдено {len(fwmark_rules)} дублирующих правила политики маршрутизации для fwmark 0x1")
         else:
             print("❌ Не найдено правила политики маршрутизации для fwmark 0x1")
     else:
         print("❌ Не удалось получить правила политики маршрутизации")
     
     # Проверяем таблицы маршрутов
-    result = execute_command("ip route show table 1000", "Проверка таблицы маршрутов 1000")
+    result = execute_command("ip route show table wg1_table", "Проверка таблицы маршрутов wg1_table")
     if result:
-        print("✅ Найдена таблица маршрутов 1000:")
+        print("✅ Найдена таблица маршрутов wg1_table:")
         print(f"   {result.strip()}")
     else:
-        print("❌ Таблица маршрутов 1000 не найдена")
+        print("❌ Таблица маршрутов wg1_table не найдена")
+        # Пробуем проверить по числовому ID
+        result = execute_command("ip route show table 1000", "Проверка таблицы маршрутов 1000")
+        if result:
+            print("✅ Найдена таблица маршрутов 1000:")
+            print(f"   {result.strip()}")
+        else:
+            print("❌ Таблица маршрутов 1000 не найдена")
 
 def check_systemd_service():
     """Проверяет статус systemd сервиса WireGuard"""
