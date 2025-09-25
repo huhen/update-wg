@@ -16,18 +16,6 @@ COUNTRY_CODE = 'RU'                # страна для RIPE
 CUTOFF_PREFIX = 10                 # маска для "загрубления" мелких сетей
 
 def read_cidrs_from_file(filepath):
-    cidrs = []
-    try:
-        with open(filepath, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    cidrs.append(line)
-    except FileNotFoundError:
-        print(f"⚠️ Файл {filepath} не найден. Продолжаем без локальных исключений.", file=sys.stderr)
-    return cidrs
-
-def read_cidrs_from_file(filepath):
     """Читает CIDR из файла (игнорирует пустые строки и комментарии)."""
     cidrs = []
     if not os.path.exists(filepath):
@@ -114,6 +102,18 @@ def write_wg_config(filepath, content):
         f.write(content)
     print(f"✅ Файл {filepath} успешно обновлён.", file=sys.stderr)
 
+def apply_config_and_restart(interface='wg1'):
+    """Перезапускает wg-интерфейс для применения новых маршрутов."""
+    try:
+        subprocess.run(['systemctl', 'stop', 'wg-quick@{interface}'], 
+                       check=False, 
+                       stdout=subprocess.DEVNULL, 
+                       stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    subprocess.run(['systemctl', 'start', 'wg-quick@{interface}'], check=True)
+    print(f"🔄 Интерфейс {interface} перезапущен. Маршруты обновлены.", file=sys.stderr)
+
 def apply_wg_config(interface='wg1', config_path='/etc/wireguard/wg1.conf'):
     # Извлекаем секции [Peer]
     peer_file = '/tmp/wg-peer-sync.conf'
@@ -190,7 +190,8 @@ def main():
     # 12. Опционально: выводим количество правил
     print(f"📊 В AllowedIPs добавлено {len(allowed_cidrs)} префиксов.", file=sys.stderr)
 
-    apply_wg_config(WG_INTERFACE, WG_CONFIG_FILE)
+    # apply_wg_config(WG_INTERFACE, WG_CONFIG_FILE)
+    apply_config_and_restart(WG_INTERFACE)
 
 if __name__ == '__main__':
     main()
