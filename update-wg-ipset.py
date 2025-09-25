@@ -136,7 +136,7 @@ def flush_ipset(ipset_name):
 
 def add_to_ipset(ipset_name, cidr):
     """Добавляет CIDR в ipset"""
-    execute_command(f"ipset add {ipset_name} {cidr}", f"Добавление {cidr} в ipset")
+    execute_command(f"ipset add {ipset_name} {cidr}", "")
 
 def setup_iptables_rules(wg_interface, ipset_name):
     """Настраивает iptables правила для перенаправления трафика"""
@@ -268,7 +268,7 @@ def main():
     print(f"🧱 Всего исключений после объединения: {len(excluded_set.iter_cidrs())} CIDR", file=sys.stderr)
 
     # 5. Вычитаем из полного IPv4
-    full_ipv4 = IPSet(['0.0.0/0'])
+    full_ipv4 = IPSet(['0.0.0.0/0'])
     allowed_ipv4 = full_ipv4 - excluded_set
 
     # 6. ДОБАВЛЯЕМ include.txt (приоритет выше!)
