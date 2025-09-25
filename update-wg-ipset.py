@@ -222,9 +222,13 @@ def setup_routing_rules(wg_interface, route_table_id, fw_mark):
 def cleanup_routing_rules(route_table_id, fw_mark):
     """Очищает правила маршрутизации"""
     # Удаляем все правила политики маршрутизации с указанным fwmark
-    # Сначала получаем список правил
-    result = execute_command_no_check("ip rule show", "Получение списка правил маршрутизации")
-    if result[0]:
+    # Повторяем процесс несколько раз, чтобы убедиться, что все дубликаты удалены
+    for attempt in range(30):  # делаем до 30 попыток
+        # Сначала получаем список правил
+        result = execute_command_no_check("ip rule show", "Получение списка правил маршрутизации")
+        if not result[0]:
+            break
+            
         lines = result[0].split('\n')
         # Сначала собираем все номера правил с нужным fwmark
         rule_numbers = []
@@ -237,6 +241,10 @@ def cleanup_routing_rules(route_table_id, fw_mark):
                     if rule_number.isdigit():  # Проверяем, что это действительно номер правила
                         rule_numbers.append(rule_number)
         
+        # Если нет правил для удаления, выходим из цикла
+        if not rule_numbers:
+            break
+            
         # Затем удаляем все найденные правила
         for rule_number in rule_numbers:
             execute_command_no_check(f"ip rule del {rule_number}",
