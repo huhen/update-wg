@@ -221,47 +221,27 @@ def setup_routing_rules(wg_interface, route_table_id, fw_mark):
 
 def cleanup_routing_rules(route_table_id, fw_mark):
     """Очищает правила маршрутизации"""
-    # Удаляем все правила политики маршрутизации с указанным fwmark
-    # Повторяем процесс несколько раз, чтобы убедиться, что все дубликаты удалены
-    for attempt in range(30):  # делаем до 30 попыток
-        # Сначала получаем список правил
-        result = execute_command_no_check("ip rule show", "Получение списка правил маршрутизации")
-        if not result[0]:
-            break
-            
-        lines = result[0].split('\n')
-        # Сначала собираем все номера правил с нужным fwmark
-        rule_numbers = []
-        for line in lines:
-            if f"fwmark {fw_mark}" in line:
-                # Извлекаем номер правила
-                parts = line.split(':')
-                if len(parts) > 0:
-                    rule_number = parts[0].strip()
-                    if rule_number.isdigit():  # Проверяем, что это действительно номер правила
-                        rule_numbers.append(rule_number)
-        
-        # Если нет правил для удаления, выходим из цикла
-        if not rule_numbers:
-            break
-            
-        # Затем удаляем все найденные правила
-        for rule_number in rule_numbers:
-            execute_command_no_check(f"ip rule del {rule_number}",
-                                        f"Удаление правила маршрутизации {rule_number}")
+    # Удаляем правила политики маршрутизации с указанным fwmark и таблицей
+    # Используем прямое удаление по селекторам, что более надежно, чем удаление по номеру
     
-    # Также пробуем удалить правило напрямую, если оно осталось
-    execute_command_no_check(f"ip rule del fwmark {fw_mark} table {route_table_id}",
-                            "Прямое удаление правила политики маршрутизации")
+    # Повторяем удаление несколько раз, чтобы избавиться от всех дубликатов
+    for attempt in range(5):  # делаем до 5 попыток
+        result = execute_command_no_check(f"ip rule del fwmark {fw_mark} table {route_table_id}",
+                                         f"Удаление правила политики маршрутизации (попытка {attempt+1})")
+        # Если команда возвращает ошибку "RTNETLINK answers: No such file or directory",
+        # это означает, что правило уже удалено
+        if result[1] != 0 and "No such file or directory" in result[0]:
+            # Правило уже удалено, выходим из цикла
+            break
     
     # Проверяем, остались ли какие-то правила с этим fwmark
     result = execute_command_no_check("ip rule show", "Проверка оставшихся правил маршрутизации")
     if result[0]:
-        remaining_rules = [line for line in result[0].split('\n') if f"fwmark {fw_mark}" in line]
+        remaining_rules = [line for line in result[0].split('\n') if f"fwmark {fw_mark}" in line and f"lookup {route_table_id}" in line]
         if remaining_rules:
-            print(f"⚠️  Остались правила с fwmark {fw_mark}: {remaining_rules}", file=sys.stderr)
+            print(f"⚠️  Остались правила с fwmark {fw_mark} и таблицей {route_table_id}: {remaining_rules}", file=sys.stderr)
         else:
-            print(f"✅ Все правила с fwmark {fw_mark} успешно удалены", file=sys.stderr)
+            print(f"✅ Все правила с fwmark {fw_mark} и таблицей {route_table_id} успешно удалены", file=sys.stderr)
 
 def setup_iptables_rules(wg_interface, ipset_name, fw_mark):
     """Настраивает iptables правила для маркировки трафика"""
