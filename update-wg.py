@@ -13,7 +13,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCLUDE_FILE = os.path.join(SCRIPT_DIR, 'exclude.txt') # локальные исключения
 INCLUDE_FILE = os.path.join(SCRIPT_DIR, 'include.txt') 
 COUNTRY_CODE = 'RU'                # страна для RIPE
-CUTOFF_PREFIX = 12                 # маска для "загрубления" мелких сетей
+CUTOFF_PREFIX = 10                 # маска для "загрубления" мелких сетей
 
 def read_cidrs_from_file(filepath):
     cidrs = []

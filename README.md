@@ -22,4 +22,5 @@ sudo /opt/update-wg/bin/python3 /opt/update-wg/update-wg.py
 Edit exlude
 ```
 sudo nano /opt/update-wg/exclude.txt
+sudo nano /opt/update-wg/include.txt
 ```
