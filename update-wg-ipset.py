@@ -226,6 +226,8 @@ def cleanup_routing_rules(route_table_id, fw_mark):
     result = execute_command_no_check("ip rule show", "Получение списка правил маршрутизации")
     if result[0]:
         lines = result[0].split('\n')
+        # Сначала собираем все номера правил с нужным fwmark
+        rule_numbers = []
         for line in lines:
             if f"fwmark {fw_mark}" in line:
                 # Извлекаем номер правила
@@ -233,8 +235,12 @@ def cleanup_routing_rules(route_table_id, fw_mark):
                 if len(parts) > 0:
                     rule_number = parts[0].strip()
                     if rule_number.isdigit():  # Проверяем, что это действительно номер правила
-                        execute_command_no_check(f"ip rule del {rule_number}",
-                                                    f"Удаление правила маршрутизации {rule_number}")
+                        rule_numbers.append(rule_number)
+        
+        # Затем удаляем все найденные правила
+        for rule_number in rule_numbers:
+            execute_command_no_check(f"ip rule del {rule_number}",
+                                        f"Удаление правила маршрутизации {rule_number}")
     
     # Также пробуем удалить правило напрямую, если оно осталось
     execute_command_no_check(f"ip rule del fwmark {fw_mark} table {route_table_id}",
