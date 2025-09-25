@@ -33,13 +33,27 @@ def check_ipset():
         entries = [line for line in lines if '.' in line and any(c.isdigit() for c in line) and not line.startswith('Name:') and not line.startswith('Type:') and not line.startswith('Revision:') and not line.startswith('Header:') and not line.startswith('Size in memory:') and not line.startswith('References:') and not line.startswith('Number of entries:') and not line.startswith('Members:')]
         print(f"📊 Найдено {len(entries)} записей в ipset")
         
-        # Проверяем, содержит ли ipset нужный IP
+        # Проверяем, содержит ли ipset нужный IP с помощью ipset test
         target_ip = "151.101.194.217"
-        has_target = any(target_ip.split('.')[0] + '.' + target_ip.split('.')[1] in line for line in lines if '.' in line)
-        if has_target:
+        test_result = execute_command_no_check(f"ipset test wg_allowed_ips {target_ip}", "")
+        if test_result[1] == 0:  # Если код возврата 0, значит IP в ipset
             print(f"✅ Целевой IP {target_ip} присутствует в ipset")
         else:
             print(f"❌ Целевой IP {target_ip} отсутствует в ipset")
+            
+            # Проверим, может быть IP входит в один из CIDR блоков
+            print(f"💡 Проверка, входит ли {target_ip} в один из разрешенных CIDR блоков...")
+            for line in entries:
+                if line.strip():
+                    # Проверим каждый CIDR блок на вхождение IP
+                    cidr = line.strip()
+                    check_cmd = f"python3 -c \"from netaddr import IPNetwork, IPAddress; print(IPAddress('{target_ip}') in IPNetwork('{cidr}'))\" 2>/dev/null || echo 'need to check manually'"
+                    check_result = execute_command_no_check(check_cmd, "")
+                    if check_result and "True" in str(check_result[0]):
+                        print(f"✅ Целевой IP {target_ip} входит в разрешенный блок {cidr}")
+                        break
+            else:
+                print(f"❌ Целевой IP {target_ip} не входит ни в один разрешенный блок")
     else:
         print("❌ ipset wg_allowed_ips не найден")
 
@@ -105,19 +119,34 @@ def check_routing(ip_to_test="151.101.194.217"):
     """Проверяет маршрутизацию для конкретного IP"""
     print(f"\n🔍 Проверка маршрутизации для {ip_to_test}...")
     
-    # Проверяем маршрут для целевого IP
-    result = execute_command(f"ip route get {ip_to_test}", f"Проверка маршрута для {ip_to_test}")
+    # Проверяем обычный маршрут для целевого IP
+    result = execute_command(f"ip route get {ip_to_test}", f"Проверка обычного маршрута для {ip_to_test}")
     if result:
-        print(f"✅ Найден маршрут для {ip_to_test}")
+        print(f"✅ Найден обычный маршрут для {ip_to_test}")
         print(f"   Маршрут: {result.strip()}")
         
-        # Проверяем, идет ли трафик через wg1
+        # Проверяем, идет ли трафик через wg1 в обычной таблице
         if "wg1" in result:
-            print(f"✅ Трафик для {ip_to_test} направляется через wg1")
+            print(f"⚠️ Трафик для {ip_to_test} направляется через wg1 в обычной таблице (это неожиданно)")
         else:
-            print(f"❌ Трафик для {ip_to_test} НЕ направляется через wg1")
+            print(f"❌ Трафик для {ip_to_test} НЕ направляется через wg1 в обычной таблице (это нормально)")
     else:
-        print(f"❌ Не найден маршрут для {ip_to_test}")
+        print(f"❌ Не найден обычный маршрут для {ip_to_test}")
+    
+    # Проверяем маршрут с использованием fwmark (как если бы трафик был помечен)
+    print(f"\n🔍 Проверка маршрута для {ip_to_test} с fwmark 0x1 (как если бы iptables его пометил)...")
+    result = execute_command(f"ip route get {ip_to_test} fwmark 0x1", f"Проверка маршрута с fwmark для {ip_to_test}")
+    if result:
+        print(f"✅ Найден маршрут для {ip_to_test} с fwmark 0x1")
+        print(f"   Маршрут: {result.strip()}")
+        
+        # Проверяем, идет ли трафик через wg1 при наличии fwmark
+        if "wg1" in result:
+            print(f"✅ Трафик для {ip_to_test} с fwmark 0x1 направляется через wg1")
+        else:
+            print(f"❌ Трафик для {ip_to_test} с fwmark 0x1 НЕ направляется через wg1")
+    else:
+        print(f"❌ Не найден маршрут для {ip_to_test} с fwmark 0x1")
 
 def check_kernel_parameters():
     """Проверяет параметры ядра, влияющие на маршрутизацию"""
@@ -167,6 +196,12 @@ def check_policy_routing():
             print(f"   {result.strip()}")
         else:
             print("❌ Таблица маршрутов 1000 не найдена")
+            # Проверим, есть ли вообще какие-то таблицы с этим ID
+            result = execute_command("cat /etc/iproute2/rt_tables", "Проверка файла определения таблиц")
+            if result and "1000 wg1_table" in result:
+                print("✅ Таблица 1000 определена в /etc/iproute2/rt_tables")
+            else:
+                print("❌ Таблица 1000 не определена в /etc/iproute2/rt_tables")
 
 def check_systemd_service():
     """Проверяет статус systemd сервиса WireGuard"""
