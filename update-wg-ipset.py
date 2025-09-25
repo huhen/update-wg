@@ -179,10 +179,25 @@ def setup_routing_rules(wg_interface, route_table_id, fw_mark):
     execute_command(f"ip rule add fwmark {fw_mark} table {route_table_id}",
                    f"Настройка правила политики маршрутизации для {wg_interface}")
     
-    # Настраиваем маршрут по умолчанию через wg_interface в новой таблице
-    # Поскольку WireGuard настроен с Table = off, маршруты нужно устанавливать вручную
-    execute_command(f"ip route add default dev {wg_interface} table {route_table_id}",
-                   f"Настройка маршрута по умолчанию через {wg_interface}")
+    # Перед настройкой маршрута проверяем, что интерфейс поднят
+    interface_up = execute_command_no_check(f"ip link show {wg_interface}", "")
+    if interface_up[1] == 0:
+        # Настраиваем маршрут по умолчанию через wg_interface в новой таблице
+        # Поскольку WireGuard настроен с Table = off, маршруты нужно устанавливать вручную
+        execute_command(f"ip route add default dev {wg_interface} table {route_table_id}",
+                       f"Настройка маршрута по умолчанию через {wg_interface}")
+    else:
+        print(f"⚠️ Интерфейс {wg_interface} не активен, маршрут по умолчанию не будет добавлен", file=sys.stderr)
+        # Ждем немного и пробуем снова
+        import time
+        time.sleep(3)
+        interface_up = execute_command_no_check(f"ip link show {wg_interface}", "")
+        if interface_up[1] == 0:
+            execute_command(f"ip route add default dev {wg_interface} table {route_table_id}",
+                           f"Настройка маршрута по умолчанию через {wg_interface} (вторая попытка)")
+        else:
+            print(f"❌ Интерфейс {wg_interface} так и не стал активен, невозможно настроить маршрут", file=sys.stderr)
+            sys.exit(1)
 
 def cleanup_routing_rules(route_table_id, fw_mark):
     """Очищает правила маршрутизации"""
@@ -198,10 +213,28 @@ def cleanup_routing_rules(route_table_id, fw_mark):
                 if len(parts) > 0:
                     rule_number = parts[0].strip()
                     try:
+                        # Удаляем правило с помощью команды
                         execute_command_no_check(f"ip rule del {rule_number}",
                                                 f"Удаление правила маршрутизации {rule_number}")
                     except:
                         pass
+    
+    # Также удаляем возможные дубликаты с именем таблицы
+    result = execute_command_no_check("ip rule show", "Получение списка правил маршрутизации после частичной очистки")
+    if result[0]:
+        lines = result[0].split('\n')
+        for line in lines:
+            if f"fwmark {fw_mark}" in line and f"wg1_table" in line and f"lookup" in line:
+                # Извлекаем номер правила
+                parts = line.split(':')
+                if len(parts) > 0:
+                    rule_number = parts[0].strip()
+                    if rule_number.isdigit():  # Проверяем, что это действительно номер правила
+                        try:
+                            execute_command_no_check(f"ip rule del {rule_number}",
+                                                    f"Удаление правила маршрутизации {rule_number}")
+                        except:
+                            pass
 
 def setup_iptables_rules(wg_interface, ipset_name, fw_mark):
     """Настраивает iptables правила для маркировки трафика"""
