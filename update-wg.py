@@ -3,9 +3,12 @@ import sys
 import re
 from netaddr import IPSet, IPNetwork, iprange_to_cidrs
 import requests
+import subprocess
+import os
 
 # === Настройки ===
-WG_CONFIG_FILE = 'wg1.conf'        # путь к конфигу WireGuard
+WG_CONFIG_FILE = '/etc/wireguard/wg1.conf'        # путь к конфигу WireGuard
+WG_INTERFACE = 'wg1'
 EXCLUDE_FILE = 'exclude.txt'       # локальные исключения
 COUNTRY_CODE = 'RU'                # страна для RIPE
 CUTOFF_PREFIX = 16                 # маска для "загрубления" мелких сетей
@@ -93,6 +96,23 @@ def write_wg_config(filepath, content):
         f.write(content)
     print(f"✅ Файл {filepath} успешно обновлён.", file=sys.stderr)
 
+def apply_wg_config(interface='wg1', config_path='/etc/wireguard/wg1.conf'):
+    # Извлекаем секции [Peer]
+    peer_file = '/tmp/wg-peer-sync.conf'
+    with open(config_path, 'r') as f_in, open(peer_file, 'w') as f_out:
+        write = False
+        for line in f_in:
+            if line.strip() == '[Peer]':
+                write = True
+            if write:
+                f_out.write(line)
+    try:
+        subprocess.run(['wg', 'syncconf', interface, peer_file], check=True)
+        print(f"✅ Конфигурация пира для {interface} обновлена через wg syncconf.", file=sys.stderr)
+    finally:
+        if os.path.exists(peer_file):
+            os.remove(peer_file)
+
 def main():
     # 1. Локальные исключения — БЕЗ изменений
     local_excludes = read_cidrs_from_file(EXCLUDE_FILE)
@@ -142,6 +162,8 @@ def main():
 
     # 9. Опционально: выводим количество правил
     print(f"📊 В AllowedIPs добавлено {len(allowed_cidrs)} префиксов.", file=sys.stderr)
+
+    apply_wg_config(WG_INTERFACE, WG_CONFIG_FILE)
 
 if __name__ == '__main__':
     main()
