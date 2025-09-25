@@ -148,7 +148,8 @@ def flush_ipset(ipset_name):
 
 def add_to_ipset(ipset_name, cidr):
     """Добавляет CIDR в ipset"""
-    execute_command(f"ipset add {ipset_name} {cidr}", f"Добавление {cidr} в ipset")
+    # в консоль ничего не выводим чтоб не флудить
+    execute_command(f"ipset add {ipset_name} {cidr}")
 
 def setup_routing_rules(wg_interface, route_table_id, fw_mark):
     """Настраивает правила маршрутизации для направления трафика в wg_interface"""
