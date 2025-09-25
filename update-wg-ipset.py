@@ -159,31 +159,13 @@ def setup_routing_rules(wg_interface, route_table_id, fw_mark):
     print(f"✅ Добавлена таблица маршрутов {route_table_id} для {wg_interface}", file=sys.stderr)
     
     # Настраиваем правило политики маршрутизации
-    execute_command(f"ip rule add fwmark {fw_mark} table {route_table_id}", 
+    execute_command(f"ip rule add fwmark {fw_mark} table {route_table_id}",
                    f"Настройка правила политики маршрутизации для {wg_interface}")
     
     # Настраиваем маршрут по умолчанию через wg_interface в новой таблице
-    # Получаем адрес шлюза WireGuard из конфигурации
-    try:
-        with open(f'/etc/wireguard/{wg_interface}.conf', 'r') as f:
-            content = f.read()
-        
-        # Ищем адрес WireGuard интерфейса
-        for line in content.split('\n'):
-            if line.strip().startswith('Address'):
-                address_part = line.split('=')[1].strip()
-                wg_address = address_part.split('/')[0]  # Получаем IP-адрес без маски
-                break
-        else:
-            wg_address = "10.10.0.2"  # fallback
-        
-        # Устанавливаем маршрут по умолчанию через wg_interface
-        execute_command(f"ip route add default dev {wg_interface} table {route_table_id}", 
-                       f"Настройка маршрута по умолчанию через {wg_interface}")
-    except Exception as e:
-        # Если не удалось получить адрес, используем fallback
-        execute_command(f"ip route add default dev {wg_interface} table {route_table_id}", 
-                       f"Настройка маршрута по умолчанию через {wg_interface} (fallback)")
+    # Поскольку WireGuard настроен с Table = off, маршруты нужно устанавливать вручную
+    execute_command(f"ip route add default dev {wg_interface} table {route_table_id}",
+                   f"Настройка маршрута по умолчанию через {wg_interface}")
 
 def cleanup_routing_rules(route_table_id, fw_mark):
     """Очищает правила маршрутизации"""
@@ -229,26 +211,73 @@ def update_wireguard_config_for_ipset(config_path):
         with open(config_path, 'r') as f:
             content = f.read()
         
-        # Заменяем или добавляем AllowedIPs с минимальным значением
-        # Удаляем существующую строку AllowedIPs
+        # Заменяем или добавляем параметры в конфигурации
         lines = content.split('\n')
         new_lines = []
-        for line in lines:
-            if not line.strip().startswith('AllowedIPs'):
-                new_lines.append(line)
-            else:
-                # Добавляем комментарий вместо старой строки
-                new_lines.append(f"# {line}  # Закомментировано для использования с ipset/iptables")
+        interface_section_found = False
+        table_param_added = False
+        allowed_ips_commented = False
         
-        # Добавляем новую строку AllowedIPs с минимальным набором
-        # Вставляем после секции [Peer]
-        modified_content = '\n'.join(new_lines)
-        modified_content = re.sub(
-            r'(\[Peer\]\s*\n)',
-            r'\1AllowedIPs = 0.0.0.0/32\n',  # Пустой маршрут, так как управление через iptables
-            modified_content,
-            count=1
-        )
+        for line in lines:
+            if '[Interface]' in line:
+                interface_section_found = True
+                new_lines.append(line)
+            elif interface_section_found and not table_param_added and not line.strip().startswith('['):
+                # Проверяем, есть ли уже параметр Table
+                if line.strip().startswith('Table'):
+                    # Заменяем существующий Table параметр
+                    new_lines.append('Table = off  # Управление маршрутами через ip rule/ip route')
+                    table_param_added = True
+                elif line.strip() == '':
+                    # Добавляем Table параметр перед пустой строкой в секции [Interface]
+                    new_lines.append('Table = off  # Управление маршрутами через ip rule/ip route')
+                    table_param_added = True
+                    new_lines.append(line)
+                else:
+                    new_lines.append(line)
+            elif line.strip().startswith('[') and interface_section_found and not table_param_added:
+                # Если мы вышли из секции [Interface] и не добавили Table, добавляем его перед текущей строкой
+                new_lines.append('Table = off  # Управление маршрутами через ip rule/ip route')
+                table_param_added = True
+                new_lines.append(line)
+                interface_section_found = False  # Сбросим флаг, чтобы не обрабатывать другие секции как [Interface]
+            elif line.strip().startswith('AllowedIPs') and not allowed_ips_commented:
+                # Комментируем AllowedIPs в [Peer] секции
+                new_lines.append(f"# {line}  # Закомментировано для использования с ipset/iptables")
+                allowed_ips_commented = True
+            else:
+                new_lines.append(line)
+        
+        # Если параметр Table не был добавлен, добавляем его в [Interface] секцию
+        if not table_param_added:
+            modified_content = '\n'.join(new_lines)
+            # Добавляем Table в секцию [Interface]
+            modified_content = re.sub(
+                r'(\[Interface\]\s*\n)',
+                r'\1Table = off  # Управление маршрутами через ip rule/ip route\n',
+                modified_content,
+                count=1
+            )
+        else:
+            modified_content = '\n'.join(new_lines)
+        
+        # Добавляем минимальный AllowedIPs в [Peer] секцию, если он еще не добавлен
+        if not allowed_ips_commented:
+            modified_content = re.sub(
+                r'(\[Peer\]\s*\n)',
+                r'\1AllowedIPs = 0.0.0.0/32\n',  # Пустой маршрут, так как управление через iptables
+                modified_content,
+                count=1
+            )
+        else:
+            # Если AllowedIPs уже был закомментирован, оставляем как есть и добавляем новый после
+            # Находим место после закомментированных AllowedIPs и добавляем новый
+            modified_content = re.sub(
+                r'(\[Peer\]\s*\n(?:.*?#\s*AllowedIPs.*\n)*)(?!\s*AllowedIPs)',
+                r'\1AllowedIPs = 0.0.0.0/32\n',  # Пустой маршрут, так как управление через iptables
+                modified_content,
+                count=1
+            )
         
         with open(config_path, 'w') as f:
             f.write(modified_content)

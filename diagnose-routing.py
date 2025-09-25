@@ -87,6 +87,18 @@ def check_wireguard():
         print(f"   Статус: {result.strip()}")
     else:
         print("❌ WireGuard wg1 не работает")
+    
+    # Проверяем конфигурацию WireGuard
+    try:
+        with open('/etc/wireguard/wg1.conf', 'r') as f:
+            content = f.read()
+        
+        if 'Table = off' in content:
+            print("✅ Параметр 'Table = off' установлен в конфигурации wg1")
+        else:
+            print("❌ Параметр 'Table = off' НЕ установлен в конфигурации wg1")
+    except Exception as e:
+        print(f"❌ Ошибка чтения конфигурации wg1: {e}")
 
 def check_routing(ip_to_test="151.101.194.217"):
     """Проверяет маршрутизацию для конкретного IP"""
