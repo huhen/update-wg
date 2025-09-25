@@ -105,13 +105,13 @@ def write_wg_config(filepath, content):
 def apply_config_and_restart(interface='wg1'):
     """Перезапускает wg-интерфейс для применения новых маршрутов."""
     try:
-        subprocess.run(['systemctl', 'stop', 'wg-quick@{interface}'], 
+        subprocess.run(['systemctl', 'stop', f'wg-quick@{interface}'], 
                        check=False, 
                        stdout=subprocess.DEVNULL, 
                        stderr=subprocess.DEVNULL)
     except Exception:
         pass
-    subprocess.run(['systemctl', 'start', 'wg-quick@{interface}'], check=True)
+    subprocess.run(['systemctl', 'start', f'wg-quick@{interface}'], check=True)
     print(f"🔄 Интерфейс {interface} перезапущен. Маршруты обновлены.", file=sys.stderr)
 
 def apply_wg_config(interface='wg1', config_path='/etc/wireguard/wg1.conf'):
