@@ -338,7 +338,7 @@ def main():
     print(f"🧱 Всего исключений после объединения: {len(excluded_set.iter_cidrs())} CIDR", file=sys.stderr)
 
     # 5. Вычитаем из полного IPv4
-    full_ipv4 = IPSet(['0.0.0/0'])
+    full_ipv4 = IPSet(['0.0.0.0/0'])
     allowed_ipv4 = full_ipv4 - excluded_set
 
     # 6. ДОБАВЛЯЕМ include.txt (приоритет выше!)
