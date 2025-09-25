@@ -179,25 +179,44 @@ def setup_routing_rules(wg_interface, route_table_id, fw_mark):
     execute_command(f"ip rule add fwmark {fw_mark} table {route_table_id}",
                    f"Настройка правила политики маршрутизации для {wg_interface}")
     
-    # Перед настройкой маршрута проверяем, что интерфейс поднят
-    interface_up = execute_command_no_check(f"ip link show {wg_interface}", "")
-    if interface_up[1] == 0:
-        # Настраиваем маршрут по умолчанию через wg_interface в новой таблице
-        # Поскольку WireGuard настроен с Table = off, маршруты нужно устанавливать вручную
-        execute_command(f"ip route add default dev {wg_interface} table {route_table_id}",
-                       f"Настройка маршрута по умолчанию через {wg_interface}")
+    # Ждем, пока интерфейс станет активным и готовым к передаче трафика
+    import time
+    max_wait = 20 # увеличиваем максимальное время ожидания
+    wait_interval = 2  # увеличиваем интервал проверки
+    waited = 0
+    
+    while waited < max_wait:
+        # Проверяем, что интерфейс поднят
+        interface_up_result = execute_command_no_check(f"ip link show {wg_interface} up", "")
+        if interface_up_result[1] == 0:
+            # Проверяем, есть ли IP-адрес на интерфейсе
+            addr_result = execute_command_no_check(f"ip addr show {wg_interface}", "")
+            if addr_result[0] and wg_interface in addr_result[0] and 'inet ' in addr_result[0]:
+                # Проверяем, что интерфейс действительно UP (а не только сконфигурирован)
+                if 'state UP' in addr_result[0]:
+                    # Проверяем, что WireGuard показывает пиров как активные
+                    wg_result = execute_command_no_check(f"wg show {wg_interface}", "")
+                    if wg_result[0] and 'latest handshake' in wg_result[0]:
+                        # Настраиваем маршрут по умолчанию через wg_interface в новой таблице
+                        execute_command(f"ip route add default dev {wg_interface} table {route_table_id}",
+                                       f"Настройка маршрута по умолчанию через {wg_interface}")
+                        
+                        # Проверяем, что маршрут действительно добавлен
+                        route_check = execute_command_no_check(f"ip route show table {route_table_id}", "")
+                        if route_check[0] and wg_interface in route_check[0]:
+                            print(f"✅ Маршрут по умолчанию через {wg_interface} успешно добавлен в таблицу {route_table_id}", file=sys.stderr)
+                            break
+                        else:
+                            print(f"⚠️ Не удалось подтвердить добавление маршрута в таблицу {route_table_id}, повторяем...", file=sys.stderr)
+                    else:
+                        print(f"ℹ️  Интерфейс {wg_interface} поднят, но соединение WireGuard еще не установлено", file=sys.stderr)
+                else:
+                    print(f"ℹ️  Интерфейс {wg_interface} сконфигурирован, но не в состоянии UP", file=sys.stderr)
+        time.sleep(wait_interval)
+        waited += wait_interval
     else:
-        print(f"⚠️ Интерфейс {wg_interface} не активен, маршрут по умолчанию не будет добавлен", file=sys.stderr)
-        # Ждем немного и пробуем снова
-        import time
-        time.sleep(3)
-        interface_up = execute_command_no_check(f"ip link show {wg_interface}", "")
-        if interface_up[1] == 0:
-            execute_command(f"ip route add default dev {wg_interface} table {route_table_id}",
-                           f"Настройка маршрута по умолчанию через {wg_interface} (вторая попытка)")
-        else:
-            print(f"❌ Интерфейс {wg_interface} так и не стал активен, невозможно настроить маршрут", file=sys.stderr)
-            sys.exit(1)
+        print(f"❌ Интерфейс {wg_interface} не стал полностью готов за {max_wait} секунд, невозможно настроить маршрут", file=sys.stderr)
+        sys.exit(1)
 
 def cleanup_routing_rules(route_table_id, fw_mark):
     """Очищает правила маршрутизации"""
@@ -207,34 +226,27 @@ def cleanup_routing_rules(route_table_id, fw_mark):
     if result[0]:
         lines = result[0].split('\n')
         for line in lines:
-            if f"fwmark {fw_mark}" in line and f"lookup {route_table_id}" in line:
-                # Извлекаем номер правила
-                parts = line.split(':')
-                if len(parts) > 0:
-                    rule_number = parts[0].strip()
-                    try:
-                        # Удаляем правило с помощью команды
-                        execute_command_no_check(f"ip rule del {rule_number}",
-                                                f"Удаление правила маршрутизации {rule_number}")
-                    except:
-                        pass
-    
-    # Также удаляем возможные дубликаты с именем таблицы
-    result = execute_command_no_check("ip rule show", "Получение списка правил маршрутизации после частичной очистки")
-    if result[0]:
-        lines = result[0].split('\n')
-        for line in lines:
-            if f"fwmark {fw_mark}" in line and f"wg1_table" in line and f"lookup" in line:
+            if f"fwmark {fw_mark}" in line:
                 # Извлекаем номер правила
                 parts = line.split(':')
                 if len(parts) > 0:
                     rule_number = parts[0].strip()
                     if rule_number.isdigit():  # Проверяем, что это действительно номер правила
-                        try:
-                            execute_command_no_check(f"ip rule del {rule_number}",
+                        execute_command_no_check(f"ip rule del {rule_number}",
                                                     f"Удаление правила маршрутизации {rule_number}")
-                        except:
-                            pass
+    
+    # Также пробуем удалить правило напрямую, если оно осталось
+    execute_command_no_check(f"ip rule del fwmark {fw_mark} table {route_table_id}",
+                            "Прямое удаление правила политики маршрутизации")
+    
+    # Проверяем, остались ли какие-то правила с этим fwmark
+    result = execute_command_no_check("ip rule show", "Проверка оставшихся правил маршрутизации")
+    if result[0]:
+        remaining_rules = [line for line in result[0].split('\n') if f"fwmark {fw_mark}" in line]
+        if remaining_rules:
+            print(f"⚠️  Остались правила с fwmark {fw_mark}: {remaining_rules}", file=sys.stderr)
+        else:
+            print(f"✅ Все правила с fwmark {fw_mark} успешно удалены", file=sys.stderr)
 
 def setup_iptables_rules(wg_interface, ipset_name, fw_mark):
     """Настраивает iptables правила для маркировки трафика"""
@@ -247,23 +259,17 @@ def setup_iptables_rules(wg_interface, ipset_name, fw_mark):
     
     # Правила для PREROUTING в mangle таблице (маркировка трафика)
     execute_command(f"iptables -t mangle -A PREROUTING -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
-                   f"Настройка PREROUTING MARK правила")
+                   "Настройка PREROUTING MARK правила")
 
 def cleanup_iptables_rules(wg_interface, ipset_name, fw_mark):
     """Очищает старые iptables правила"""
     # Удаляем правила для OUTPUT
-    try:
-        execute_command_no_check(f"iptables -D OUTPUT -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
-                                f"Удаление старого OUTPUT MARK правила")
-    except:
-        pass
+    execute_command_no_check(f"iptables -D OUTPUT -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
+                                "Удаление старого OUTPUT MARK правила")
     
     # Удаляем правила для PREROUTING
-    try:
-        execute_command_no_check(f"iptables -t mangle -D PREROUTING -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
-                                f"Удаление старого PREROUTING MARK правила")
-    except:
-        pass
+    execute_command_no_check(f"iptables -t mangle -D PREROUTING -m set --match-set {ipset_name} dst -j MARK --set-xmark {fw_mark}/0xffffffff", 
+                                "Удаление старого PREROUTING MARK правила")
 
 def update_wireguard_config_for_ipset(config_path):
     """Обновляет конфиг WireGuard для работы с ipset/iptables схемой"""
@@ -457,10 +463,7 @@ def main():
     # 10. Настраиваем iptables правила
     setup_iptables_rules(WG_INTERFACE, IPSET_NAME, FW_MARK)
 
-    # 11. Настраиваем правила маршрутизации
-    setup_routing_rules(WG_INTERFACE, ROUTE_TABLE_ID, FW_MARK)
-
-    # 11. Обновляем конфигурацию WireGuard
+    # 11. Обновляем конфигурацию WireGuard ДО перезапуска интерфейса
     update_wireguard_config_for_ipset(WG_CONFIG_FILE)
 
     # 12. Перезапускаем WireGuard интерфейс для применения изменений в конфиге
@@ -471,12 +474,15 @@ def main():
         print(f"❌ Ошибка перезапуска интерфейса {WG_INTERFACE}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 13. Сохраняем конфигурацию для восстановления после перезагрузки
+    # 13. Настраиваем правила маршрутизации ПОСЛЕ перезапуска интерфейса
+    setup_routing_rules(WG_INTERFACE, ROUTE_TABLE_ID, FW_MARK)
+
+    # 14. Сохраняем конфигурацию для восстановления после перезагрузки
     save_persistent_config(IPSET_NAME, ROUTE_TABLE_ID, FW_MARK)
 
     print(f"✅ Обновление завершено. Используется ipset {IPSET_NAME} с {len(allowed_cidrs)} CIDR.", file=sys.stderr)
     print(f"📊 Статистика: {len(local_excludes)} локальных исключений, {len(ripe_processed)} RIPE исключений, {len(include_cidrs) if include_cidrs else 0} включений", file=sys.stderr)
-    print(f"💡 Для проверки работы используйте: diagnose-routing.py", file=sys.stderr)
+    print("💡 Для проверки работы используйте: diagnose-routing.py", file=sys.stderr)
     
     # Проверяем, что ipset содержит записи
     result = execute_command_no_check(f"ipset list {IPSET_NAME}", "Проверка содержимого ipset после настройки")
